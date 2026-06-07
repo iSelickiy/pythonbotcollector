@@ -33,8 +33,9 @@ jobs:
              cd \$PROJECT_DIR
              rm -rf *
              tar xzf -
-             echo 'BOT_TOKEN=${{ secrets.BOT_TOKEN }}' > .env
-             echo 'ORGANIZER_ID=${{ secrets.ORGANIZER_ID }}' >> .env
+              echo 'BOT_TOKEN=${{ secrets.BOT_TOKEN }}' > .env
+              echo 'ORGANIZER_ID=${{ secrets.ORGANIZER_ID }}' >> .env
+              echo 'ORGANIZER_USERNAME=${{ secrets.ORGANIZER_USERNAME }}' >> .env
              docker compose down 2>/dev/null || true
              docker compose up -d --build --remove-orphans
              echo 'Deploy complete: \$PROJECT_NAME'"

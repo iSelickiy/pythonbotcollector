@@ -5,7 +5,7 @@ from typing import Set, Optional
 from telegram import Message, User
 from telegram.ext import ContextTypes
 
-from config import ORGANIZER_ID
+from config import ORGANIZER_ID, ORGANIZER_USERNAME
 from storage import (
     get_connection,
     upsert_chat_member,
@@ -38,8 +38,24 @@ def clean_name_token(token: str) -> str:
 def is_collection_message(message: Message) -> bool:
     if message.from_user is None:
         return False
-    if message.from_user.id != ORGANIZER_ID:
+
+    user = message.from_user
+    matched_by = None
+
+    if ORGANIZER_ID and user.id == ORGANIZER_ID:
+        matched_by = "id"
+    elif ORGANIZER_USERNAME and user.username and user.username.lower() == ORGANIZER_USERNAME:
+        matched_by = "username"
+
+    if not matched_by:
         return False
+
+    if matched_by == "username":
+        logger.warning(
+            "Organizer matched by username @%s — user_id=%d. Set ORGANIZER_ID=%d in .env for future.",
+            user.username, user.id, user.id,
+        )
+
     text = message.text or message.caption or ""
     if not text:
         return False

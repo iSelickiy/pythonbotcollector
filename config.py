@@ -16,4 +16,6 @@ except (ValueError, TypeError):
     print("ERROR: ORGANIZER_ID must be a numeric Telegram user ID.")
     sys.exit(1)
 
+ORGANIZER_USERNAME = os.getenv("ORGANIZER_USERNAME", "").strip().lstrip("@").lower()
+
 DB_PATH = os.getenv("DB_PATH", "data/state.db")
