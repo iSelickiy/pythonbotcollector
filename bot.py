@@ -46,6 +46,10 @@ async def on_message(update, context: ContextTypes.DEFAULT_TYPE):
     if user is None:
         return
 
+    logger.info("on_message: chat=%d user=%s (@%s) text=%s",
+                 chat_id, user.first_name, user.username,
+                 (message.text or message.caption or "")[:50])
+
     db = await get_connection()
     await upsert_chat_member(db, user.id, chat_id, user.username, user.first_name, user.last_name)
 
