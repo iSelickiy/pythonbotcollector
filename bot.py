@@ -166,8 +166,10 @@ async def main():
 
     logger.info("Bot starting...")
     async with app:
-        await app.updater.start_polling(allowed_updates=["message", "message_reaction"])
-        await asyncio.Event().wait()
+        await app.updater.start_polling()
+        while True:
+            await asyncio.sleep(30)
+            logger.info("Heartbeat — alive, updater running")
 
 
 if __name__ == "__main__":
