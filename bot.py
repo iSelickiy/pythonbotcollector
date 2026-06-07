@@ -143,7 +143,10 @@ async def main():
 
     logger.info("Bot starting...")
     try:
-        await app.run_polling(allowed_updates=["message", "message_reaction"])
+        await app.run_polling(
+            allowed_updates=["message", "message_reaction"],
+            close_loop=False,
+        )
     finally:
         await close_connection()
 
