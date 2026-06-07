@@ -13,7 +13,7 @@ from telegram.ext import (
     ContextTypes,
 )
 
-from config import BOT_TOKEN, DB_PATH
+from config import BOT_TOKEN, DB_PATH, ORGANIZER_ID, ORGANIZER_USERNAME
 from storage import init_db, get_connection, upsert_chat_member, close_connection
 from collector import (
     is_collection_message,
@@ -72,17 +72,33 @@ async def on_reaction(update, context: ContextTypes.DEFAULT_TYPE):
 
 # ── commands ──
 
+def _is_organizer(user) -> bool:
+    if user is None:
+        return False
+    if ORGANIZER_ID and user.id == ORGANIZER_ID:
+        return True
+    if ORGANIZER_USERNAME and user.username and user.username.lower() == ORGANIZER_USERNAME:
+        return True
+    return False
+
+
 async def cmd_start(update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Бот-коллектор запущен. Слушаю чат.")
 
 
 async def cmd_status(update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_organizer(update.effective_user):
+        await update.message.reply_text("Только организатор может смотреть статус.")
+        return
     db = await get_connection()
     text = await get_status_text(db)
     await update.message.reply_text(text)
 
 
 async def cmd_reset(update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_organizer(update.effective_user):
+        await update.message.reply_text("Только организатор может сбросить сбор.")
+        return
     db = await get_connection()
     await clear_collection(db)
     await update.message.reply_text("Сбор сброшен.")
