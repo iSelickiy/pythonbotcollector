@@ -1,12 +1,14 @@
 services:
   bot:
     build: .
-    container_name: collector-bot
+    container_name: pythonbotcollector
     restart: unless-stopped
     env_file:
       - .env
     volumes:
-      - ./data:/app/data
+      - botdata:/app/data
+    networks:
+      - pythonbotcollector
     deploy:
       resources:
         limits:
@@ -20,3 +22,11 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+
+volumes:
+  botdata:
+    driver: local
+
+networks:
+  pythonbotcollector:
+    driver: bridge
