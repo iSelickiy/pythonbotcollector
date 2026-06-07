@@ -86,6 +86,7 @@ def _is_organizer(user) -> bool:
 
 
 async def cmd_start(update, context: ContextTypes.DEFAULT_TYPE):
+    logger.info("CMD /start from @%s (%s %s)", update.effective_user.username, update.message.chat_id, update.message.chat.type)
     await update.message.reply_text("Бот-коллектор запущен. Слушаю чат.")
 
 
