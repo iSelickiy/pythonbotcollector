@@ -46,6 +46,9 @@ async def on_message(update, context: ContextTypes.DEFAULT_TYPE):
     if user is None:
         return
 
+    logger.info("MSG chat=%d user=@%s text=%s",
+                 chat_id, user.username, (message.text or message.caption or "")[:60])
+
     db = await get_connection()
     await upsert_chat_member(db, user.id, chat_id, user.username, user.first_name, user.last_name)
 
@@ -155,7 +158,7 @@ async def main():
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("reset", cmd_reset))
-    app.add_handler(MessageHandler((filters.TEXT | filters.CAPTION) & ~filters.COMMAND, on_message))
+    app.add_handler(MessageHandler(filters.ALL, on_message))
     app.add_handler(MessageReactionHandler(on_reaction))
 
     setup_jobs(app)
