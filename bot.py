@@ -165,11 +165,18 @@ async def main():
     setup_jobs(app)
 
     logger.info("Bot starting...")
-    async with app:
-        await app.updater.start_polling()
+    await app.initialize()
+    await app.updater.start_polling()
+    await app.start()
+
+    try:
         while True:
             await asyncio.sleep(30)
             logger.info("Heartbeat — alive, updater running")
+    finally:
+        await app.updater.stop()
+        await app.stop()
+        await app.shutdown()
 
 
 if __name__ == "__main__":
