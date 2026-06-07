@@ -46,10 +46,6 @@ async def on_message(update, context: ContextTypes.DEFAULT_TYPE):
     if user is None:
         return
 
-    logger.info("on_message: chat=%d user=%s (@%s) text=%s",
-                 chat_id, user.first_name, user.username,
-                 (message.text or message.caption or "")[:50])
-
     db = await get_connection()
     await upsert_chat_member(db, user.id, chat_id, user.username, user.first_name, user.last_name)
 
@@ -91,7 +87,6 @@ async def cmd_start(update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_status(update, context: ContextTypes.DEFAULT_TYPE):
-    logger.info("cmd_status from user=%s id=%s username=%s", update.effective_user.first_name, update.effective_user.id, update.effective_user.username)
     if not _is_organizer(update.effective_user):
         await update.message.reply_text("Только организатор может смотреть статус.")
         return
