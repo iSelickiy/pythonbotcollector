@@ -1,5 +1,6 @@
 import logging
 import asyncio
+import signal
 from datetime import time
 from zoneinfo import ZoneInfo
 
@@ -160,16 +161,27 @@ async def main():
     setup_jobs(app)
 
     logger.info("Bot starting...")
-    try:
-        await app.run_polling(
-            allowed_updates=["message", "message_reaction"],
-            close_loop=False,
-        )
-    except RuntimeError:
-        logger.info("Bot stopped")
-    finally:
-        await close_connection()
+    async with app:
+        await app.updater.start_polling(allowed_updates=["message", "message_reaction"])
+        await asyncio.Event().wait()
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
+    main_task = loop.create_task(main())
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(sig, main_task.cancel)
+        except NotImplementedError:
+            pass
+
+    try:
+        loop.run_until_complete(main_task)
+    except asyncio.CancelledError:
+        pass
+    finally:
+        loop.run_until_complete(close_connection())
+        loop.close()
