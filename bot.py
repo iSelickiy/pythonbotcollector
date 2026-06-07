@@ -46,9 +46,6 @@ async def on_message(update, context: ContextTypes.DEFAULT_TYPE):
     if user is None:
         return
 
-    logger.info("MSG chat=%d user=@%s text=%s",
-                 chat_id, user.username, (message.text or message.caption or "")[:60])
-
     db = await get_connection()
     await upsert_chat_member(db, user.id, chat_id, user.username, user.first_name, user.last_name)
 
@@ -86,7 +83,6 @@ def _is_organizer(user) -> bool:
 
 
 async def cmd_start(update, context: ContextTypes.DEFAULT_TYPE):
-    logger.info("CMD /start from @%s (%s %s)", update.effective_user.username, update.message.chat_id, update.message.chat.type)
     await update.message.reply_text("Бот-коллектор запущен. Слушаю чат.")
 
 
@@ -131,19 +127,19 @@ def setup_jobs(application: Application):
     jq.run_daily(
         remind_thursday,
         time=time(hour=22, minute=0, tzinfo=MSK),
-        days=(3,),  # Thursday (Monday=0)
+        days=(3,),
         name="remind_thursday",
     )
     jq.run_daily(
         remind_friday_morning,
         time=time(hour=9, minute=0, tzinfo=MSK),
-        days=(4,),  # Friday
+        days=(4,),
         name="remind_friday_morning",
     )
     jq.run_daily(
         remind_friday_afternoon,
         time=time(hour=15, minute=0, tzinfo=MSK),
-        days=(4,),  # Friday
+        days=(4,),
         name="remind_friday_afternoon",
     )
 
@@ -159,7 +155,7 @@ async def main():
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("reset", cmd_reset))
-    app.add_handler(MessageHandler(filters.ALL, on_message))
+    app.add_handler(MessageHandler((filters.TEXT | filters.CAPTION) & ~filters.COMMAND, on_message))
     app.add_handler(MessageReactionHandler(on_reaction))
 
     setup_jobs(app)
@@ -170,9 +166,7 @@ async def main():
     await app.start()
 
     try:
-        while True:
-            await asyncio.sleep(30)
-            logger.info("Heartbeat — alive, updater running")
+        await asyncio.Event().wait()
     finally:
         await app.updater.stop()
         await app.stop()
