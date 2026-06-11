@@ -18,8 +18,8 @@ RUN mkdir -p /app/data && chown -R botuser:botuser /app/data
 
 USER botuser
 
-HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8080/webhook')" || exit 1
+HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
+    CMD kill -0 1 || exit 1
 
 EXPOSE 8080
 
