@@ -13,7 +13,7 @@ from telegram.ext import (
     ContextTypes,
 )
 
-from config import BOT_TOKEN, DB_PATH, ORGANIZER_ID, ORGANIZER_USERNAME
+from config import BOT_TOKEN, DB_PATH, ORGANIZER_ID, ORGANIZER_USERNAME, WEBHOOK_URL, WEBHOOK_SECRET
 from storage import init_db, get_connection, upsert_chat_member, close_connection
 from collector import (
     is_collection_message,
@@ -48,8 +48,6 @@ async def on_message(update, context: ContextTypes.DEFAULT_TYPE):
 
     db = await get_connection()
     await upsert_chat_member(db, user.id, chat_id, user.username, user.first_name, user.last_name)
-    logger.info("MSG chat=%d from=@%s text=%s",
-                 chat_id, user.username, (message.text or message.caption or "")[:80])
 
     if is_collection_message(message):
         logger.info("Collection message detected from organizer in chat %d", chat_id)
@@ -164,11 +162,16 @@ async def main():
 
     logger.info("Bot starting...")
     await app.initialize()
-    await app.updater.start_polling(
-        allowed_updates=["message", "message_reaction"],
-        bootstrap_retries=-1,
-    )
     await app.start()
+    await app.updater.start_webhook(
+        listen="0.0.0.0",
+        port=8080,
+        url_path="webhook",
+        webhook_url=WEBHOOK_URL,
+        secret_token=WEBHOOK_SECRET,
+        allowed_updates=["message", "message_reaction"],
+    )
+    logger.info("Webhook server listening on :8080/webhook")
 
     try:
         await asyncio.Event().wait()

@@ -9,6 +9,14 @@ services:
       - botdata:/app/data
     networks:
       - pythonbotcollector
+      - traefik
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.pythonbotcollector.rule=Host(`projects.selickiy.space`) && PathPrefix(`/pythonbotcollector`)"
+      - "traefik.http.routers.pythonbotcollector.entrypoints=websecure"
+      - "traefik.http.routers.pythonbotcollector.tls.certresolver=letsencrypt"
+      - "traefik.http.middlewares.pythonbotcollector-stripprefix.stripprefix.prefixes=/pythonbotcollector"
+      - "traefik.http.routers.pythonbotcollector.middlewares=pythonbotcollector-stripprefix"
     deploy:
       resources:
         limits:
@@ -30,3 +38,5 @@ volumes:
 networks:
   pythonbotcollector:
     driver: bridge
+  traefik:
+    external: true

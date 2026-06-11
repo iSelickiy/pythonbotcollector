@@ -18,4 +18,7 @@ except (ValueError, TypeError):
 
 ORGANIZER_USERNAME = os.getenv("ORGANIZER_USERNAME", "").strip().lstrip("@").lower()
 
+WEBHOOK_URL = os.getenv("WEBHOOK_URL", "").strip()
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "").strip()
+
 DB_PATH = os.getenv("DB_PATH", "data/state.db")
