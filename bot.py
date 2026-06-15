@@ -1,6 +1,7 @@
 import logging
 import asyncio
 import signal
+import traceback
 from datetime import time
 from zoneinfo import ZoneInfo
 
@@ -159,6 +160,7 @@ async def main():
     app.add_handler(CommandHandler("reset", cmd_reset))
     app.add_handler(MessageHandler((filters.TEXT | filters.CAPTION) & ~filters.COMMAND, on_message))
     app.add_handler(MessageReactionHandler(on_reaction))
+    app.add_error_handler(lambda u, c: logger.error("Update caused error: %s", traceback.format_exc()))
 
     setup_jobs(app)
 
