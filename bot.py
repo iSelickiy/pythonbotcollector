@@ -48,6 +48,8 @@ async def on_message(update, context: ContextTypes.DEFAULT_TYPE):
 
     db = await get_connection()
     await upsert_chat_member(db, user.id, chat_id, user.username, user.first_name, user.last_name)
+    logger.info("MSG chat=%d from=@%s text=%s",
+                 chat_id, user.username, (message.text or message.caption or "")[:60])
 
     if is_collection_message(message):
         logger.info("Collection message detected from organizer in chat %d", chat_id)
