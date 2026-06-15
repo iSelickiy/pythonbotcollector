@@ -30,6 +30,8 @@ logging.basicConfig(
     level=logging.INFO,
 )
 logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("telegram.ext.Application").setLevel(logging.DEBUG)
+logging.getLogger("telegram.ext.Updater").setLevel(logging.DEBUG)
 logger = logging.getLogger(__name__)
 
 MSK = ZoneInfo("Europe/Moscow")
