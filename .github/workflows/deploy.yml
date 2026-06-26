@@ -32,12 +32,14 @@ jobs:
              mkdir -p \$PROJECT_DIR
              cd \$PROJECT_DIR
              rm -rf *
-             tar xzf -
-              echo 'BOT_TOKEN=${{ secrets.BOT_TOKEN }}' > .env
-              echo 'ORGANIZER_ID=${{ secrets.ORGANIZER_ID }}' >> .env
-              echo 'ORGANIZER_USERNAME=${{ secrets.ORGANIZER_USERNAME }}' >> .env
-              echo 'WEBHOOK_URL=https://projects.selickiy.space/pythonbotcollector/webhook' >> .env
-              echo 'WEBHOOK_SECRET=${{ secrets.WEBHOOK_SECRET }}' >> .env
+              tar xzf -
+              cat > .env << 'ENVEOF'
+              BOT_TOKEN=${{ secrets.BOT_TOKEN }}
+              ORGANIZER_ID=${{ secrets.ORGANIZER_ID }}
+              ORGANIZER_USERNAME=${{ secrets.ORGANIZER_USERNAME }}
+              WEBHOOK_URL=https://projects.selickiy.space/pythonbotcollector/webhook
+              WEBHOOK_SECRET=${{ secrets.WEBHOOK_SECRET }}
+              ENVEOF
              docker compose down 2>/dev/null || true
              docker compose up -d --build --remove-orphans
              echo 'Deploy complete: \$PROJECT_NAME'"

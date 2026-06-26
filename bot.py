@@ -12,6 +12,7 @@ from telegram.ext import (
     CommandHandler,
     filters,
     ContextTypes,
+    Defaults,
 )
 
 from config import BOT_TOKEN, DB_PATH, ORGANIZER_ID, ORGANIZER_USERNAME, WEBHOOK_URL, WEBHOOK_SECRET
@@ -32,7 +33,7 @@ logging.basicConfig(
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
-MSK = ZoneInfo("Europe/Moscow")
+_MSK = ZoneInfo("Europe/Moscow")
 
 
 # ── message handler: track all senders, detect collection messages ──
@@ -130,20 +131,20 @@ def setup_jobs(application: Application):
 
     jq.run_daily(
         remind_thursday,
-        time=time(hour=22, minute=0, tzinfo=MSK),
-        days=(3,),
+        time=time(hour=22, minute=0, tzinfo=_MSK),
+        days=(4,),
         name="remind_thursday",
     )
     jq.run_daily(
         remind_friday_morning,
-        time=time(hour=9, minute=0, tzinfo=MSK),
-        days=(4,),
+        time=time(hour=9, minute=0, tzinfo=_MSK),
+        days=(5,),
         name="remind_friday_morning",
     )
     jq.run_daily(
         remind_friday_afternoon,
-        time=time(hour=15, minute=0, tzinfo=MSK),
-        days=(4,),
+        time=time(hour=15, minute=0, tzinfo=_MSK),
+        days=(5,),
         name="remind_friday_afternoon",
     )
 
@@ -154,7 +155,7 @@ async def main():
     await init_db(DB_PATH)
     logger.info("Database initialized at %s", DB_PATH)
 
-    app = Application.builder().token(BOT_TOKEN).build()
+    app = Application.builder().token(BOT_TOKEN).defaults(Defaults(tzinfo=_MSK)).build()
 
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("status", cmd_status))
@@ -168,13 +169,26 @@ async def main():
     logger.info("Bot starting...")
     await app.initialize()
     await app.start()
-    await app.updater.start_webhook(
-        listen="0.0.0.0",
-        port=8080,
-        url_path="webhook",
-        webhook_url=WEBHOOK_URL,
-        secret_token=WEBHOOK_SECRET,
-        allowed_updates=["message", "message_reaction"],
+
+    try:
+        await app.updater.start_webhook(
+            listen="0.0.0.0",
+            port=8080,
+            url_path="webhook",
+            webhook_url=WEBHOOK_URL,
+            secret_token=WEBHOOK_SECRET,
+            allowed_updates=["message", "message_reaction"],
+        )
+    except Exception as e:
+        logger.critical("Webhook setup failed: %s", e)
+        raise
+
+    webhook_info = await app.bot.get_webhook_info()
+    logger.info(
+        "Webhook info: url=%s pending=%d last_error=%s",
+        webhook_info.url,
+        webhook_info.pending_update_count,
+        webhook_info.last_error_message,
     )
     logger.info("Webhook server listening on :8080/webhook")
 

@@ -249,10 +249,8 @@ async def send_reminder(context: ContextTypes.DEFAULT_TYPE, reset_after: bool = 
 
     text = await build_reminder_text(db)
     if text is None:
-        # Everyone paid - optionally clear anyway
-        if reset_after:
-            await clear_collection(db)
-            logger.info("Collection cleared (all paid, Friday 15:00)")
+        await clear_collection(db)
+        logger.info("Collection cleared (all paid)")
         return
 
     try:
