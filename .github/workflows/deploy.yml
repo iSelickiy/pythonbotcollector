@@ -5,6 +5,13 @@ on:
     branches: [main]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-pythonbotcollector
+  cancel-in-progress: false
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
@@ -12,40 +19,75 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Setup SSH
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
         run: |
+          set -euo pipefail
           mkdir -p ~/.ssh
-          echo "${{ secrets.VPS_SSH_KEY }}" > ~/.ssh/deploy_key
+          printf '%s\n' "$VPS_SSH_KEY" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
-          ssh-keyscan -H ${{ secrets.VPS_HOST }} >> ~/.ssh/known_hosts
+          ssh-keyscan -H "$VPS_HOST" >> ~/.ssh/known_hosts
+
+      - name: Build deployment archive
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          ORGANIZER_ID: ${{ secrets.ORGANIZER_ID }}
+          ORGANIZER_USERNAME: ${{ secrets.ORGANIZER_USERNAME }}
+          WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
+        run: |
+          set -euo pipefail
+          umask 077
+          printf '%s\n' \
+            "BOT_TOKEN=$BOT_TOKEN" \
+            "ORGANIZER_ID=$ORGANIZER_ID" \
+            "ORGANIZER_USERNAME=$ORGANIZER_USERNAME" \
+            "WEBHOOK_URL=https://projects.selickiy.space/pythonbotcollector/webhook" \
+            "WEBHOOK_SECRET=$WEBHOOK_SECRET" \
+            "DB_PATH=data/state.db" > .env
+          tar czf /tmp/pythonbotcollector-deploy.tar.gz \
+            --exclude='.git' \
+            --exclude='.github' \
+            .
+          rm -f .env
 
       - name: Deploy to VPS
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
         run: |
-          PROJECT_NAME="pythonbotcollector"
-          echo "Deploying $PROJECT_NAME..."
+          set -euo pipefail
+          ssh -i ~/.ssh/deploy_key "$VPS_USER@$VPS_HOST" '
+            set -eu
+            PROJECT_DIR=/opt/bigvps/projects/pythonbotcollector
+            mkdir -p "$PROJECT_DIR"
+            cd "$PROJECT_DIR"
+            find . -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
+            tar xzf -
+            docker compose build --pull bot
+            docker compose run --rm --no-deps bot python -m unittest discover -s tests -v
+            docker compose up -d --force-recreate --remove-orphans
+          ' < /tmp/pythonbotcollector-deploy.tar.gz
 
-          tar czf /tmp/deploy.tar.gz --exclude='.git' --exclude='.github' --exclude='.env' .
-
-          cat /tmp/deploy.tar.gz | ssh -i ~/.ssh/deploy_key \
-            ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} \
-            "PROJECT_NAME=pythonbotcollector
-             PROJECT_DIR=/opt/bigvps/projects/\$PROJECT_NAME
-             mkdir -p \$PROJECT_DIR
-             cd \$PROJECT_DIR
-             rm -rf *
-              tar xzf -
-              cat > .env << 'ENVEOF'
-              BOT_TOKEN=${{ secrets.BOT_TOKEN }}
-              ORGANIZER_ID=${{ secrets.ORGANIZER_ID }}
-              ORGANIZER_USERNAME=${{ secrets.ORGANIZER_USERNAME }}
-              WEBHOOK_URL=https://projects.selickiy.space/pythonbotcollector/webhook
-              WEBHOOK_SECRET=${{ secrets.WEBHOOK_SECRET }}
-              ENVEOF
-             docker compose down 2>/dev/null || true
-             docker compose up -d --build --remove-orphans
-             echo 'Deploy complete: \$PROJECT_NAME'"
-
-      - name: Verify deploy
+      - name: Verify healthy container
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
         run: |
-          sleep 5
-          ssh -i ~/.ssh/deploy_key ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} \
-            "docker ps --filter name=pythonbotcollector --format '{{.Names}} {{.Status}}'"
+          set -euo pipefail
+          ssh -i ~/.ssh/deploy_key "$VPS_USER@$VPS_HOST" '
+            set -eu
+            for attempt in 1 2 3 4 5 6 7 8 9 10 11 12; do
+              status=$(docker inspect pythonbotcollector --format "{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}" 2>/dev/null || true)
+              if [ "$status" = "healthy" ]; then
+                docker ps --filter name=pythonbotcollector --format "{{.Names}} {{.Status}}"
+                exit 0
+              fi
+              if [ "$status" = "unhealthy" ] || [ "$status" = "exited" ]; then
+                break
+              fi
+              sleep 5
+            done
+            docker logs --tail 100 pythonbotcollector 2>&1 || true
+            exit 1
+          '

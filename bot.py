@@ -1,7 +1,6 @@
 import logging
 import asyncio
 import signal
-import traceback
 from datetime import time
 from zoneinfo import ZoneInfo
 
@@ -10,20 +9,30 @@ from telegram.ext import (
     MessageHandler,
     MessageReactionHandler,
     CommandHandler,
+    TypeHandler,
     filters,
     ContextTypes,
     Defaults,
 )
+from telegram import Update
 
-from config import BOT_TOKEN, DB_PATH, ORGANIZER_ID, ORGANIZER_USERNAME, WEBHOOK_URL, WEBHOOK_SECRET
-from storage import init_db, get_connection, upsert_chat_member, close_connection
+from config import BOT_TOKEN, DB_PATH, WEBHOOK_URL, WEBHOOK_SECRET
+from storage import (
+    clear_collection,
+    close_connection,
+    get_active_collection,
+    get_connection,
+    init_db,
+    upsert_chat_member,
+)
 from collector import (
-    is_collection_message,
+    has_collection_link,
     handle_collection_message,
     handle_reaction_update,
+    get_organizer_id,
+    is_organizer,
     send_reminder,
     get_status_text,
-    clear_collection,
 )
 
 logging.basicConfig(
@@ -50,13 +59,25 @@ async def on_message(update, context: ContextTypes.DEFAULT_TYPE):
 
     db = await get_connection()
     await upsert_chat_member(db, user.id, chat_id, user.username, user.first_name, user.last_name)
-    logger.info("MSG chat=%d type=%s from=@%s text=%s",
-                 chat_id, message.chat.type, user.username,
-                 (message.text or message.caption or "")[:80])
+    is_edit = update.edited_message is not None
+    logger.info(
+        "%s chat=%d type=%s from=@%s text=%s",
+        "EDIT" if is_edit else "MSG",
+        chat_id,
+        message.chat.type,
+        user.username,
+        (message.text or message.caption or "")[:80],
+    )
 
-    if is_collection_message(message):
-        logger.info("Collection message detected from organizer in chat %d", chat_id)
+    organizer = await is_organizer(db, user)
+    if organizer and has_collection_link(message):
+        logger.info("Collection message detected from organizer in chat %d (edit=%s)", chat_id, is_edit)
         await handle_collection_message(message, chat_id)
+    elif organizer and is_edit:
+        collection = await get_active_collection(db, chat_id)
+        if collection and collection["message_id"] == message.message_id:
+            await clear_collection(db, chat_id)
+            logger.info("Collection cleared in chat %d because the edited message lost its T-Bank link", chat_id)
 
 
 # ── reaction handler ──
@@ -77,35 +98,26 @@ async def on_reaction(update, context: ContextTypes.DEFAULT_TYPE):
 
 # ── commands ──
 
-def _is_organizer(user) -> bool:
-    if user is None:
-        return False
-    if ORGANIZER_ID and user.id == ORGANIZER_ID:
-        return True
-    if ORGANIZER_USERNAME and user.username and user.username.lower() == ORGANIZER_USERNAME:
-        return True
-    return False
-
 
 async def cmd_start(update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Бот-коллектор запущен. Слушаю чат.")
 
 
 async def cmd_status(update, context: ContextTypes.DEFAULT_TYPE):
-    if not _is_organizer(update.effective_user):
+    db = await get_connection()
+    if not await is_organizer(db, update.effective_user):
         await update.message.reply_text("Только организатор может смотреть статус.")
         return
-    db = await get_connection()
-    text = await get_status_text(db)
+    text = await get_status_text(db, update.effective_chat.id)
     await update.message.reply_text(text)
 
 
 async def cmd_reset(update, context: ContextTypes.DEFAULT_TYPE):
-    if not _is_organizer(update.effective_user):
+    db = await get_connection()
+    if not await is_organizer(db, update.effective_user):
         await update.message.reply_text("Только организатор может сбросить сбор.")
         return
-    db = await get_connection()
-    await clear_collection(db)
+    await clear_collection(db, update.effective_chat.id)
     await update.message.reply_text("Сбор сброшен.")
 
 
@@ -149,20 +161,60 @@ def setup_jobs(application: Application):
     )
 
 
+async def raw_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.message or update.edited_message
+    if message:
+        logger.info(
+            "[RAW] %s chat_id=%d from=@%s type=%s text=%s",
+            "edited_message" if update.edited_message else "message",
+            message.chat_id,
+            message.from_user.username if message.from_user else None,
+            message.chat.type,
+            (message.text or message.caption or "")[:80],
+        )
+    elif update.message_reaction:
+        logger.info(
+            "[RAW] reaction chat_id=%d msg_id=%d user=%s",
+            update.message_reaction.chat.id,
+            update.message_reaction.message_id,
+            update.message_reaction.user.username if update.message_reaction.user else None,
+        )
+    else:
+        logger.info("[RAW] update type=%s", type(update).__name__)
+
+
+async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE):
+    error = context.error
+    update_id = getattr(update, "update_id", None)
+    if isinstance(error, BaseException):
+        logger.error(
+            "Unhandled error while processing update_id=%s",
+            update_id,
+            exc_info=(type(error), error, error.__traceback__),
+        )
+    else:
+        logger.error("Unhandled non-exception error while processing update_id=%s: %r", update_id, error)
+
+
 # ── main ──
 
 async def main():
     await init_db(DB_PATH)
     logger.info("Database initialized at %s", DB_PATH)
+    db = await get_connection()
+    organizer_id = await get_organizer_id(db)
+    if organizer_id:
+        logger.info("Organizer identity ready: user_id=%d", organizer_id)
 
     app = Application.builder().token(BOT_TOKEN).defaults(Defaults(tzinfo=_MSK)).build()
 
+    app.add_handler(TypeHandler(Update, raw_update), group=-1)
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("reset", cmd_reset))
     app.add_handler(MessageHandler((filters.TEXT | filters.CAPTION) & ~filters.COMMAND, on_message))
     app.add_handler(MessageReactionHandler(on_reaction))
-    app.add_error_handler(lambda u, c: logger.error("Update caused error: %s", traceback.format_exc()))
+    app.add_error_handler(on_error)
 
     setup_jobs(app)
 
@@ -177,7 +229,7 @@ async def main():
             url_path="webhook",
             webhook_url=WEBHOOK_URL,
             secret_token=WEBHOOK_SECRET,
-            allowed_updates=["message", "message_reaction"],
+            allowed_updates=["message", "edited_message", "message_reaction"],
         )
     except Exception as e:
         logger.critical("Webhook setup failed: %s", e)
