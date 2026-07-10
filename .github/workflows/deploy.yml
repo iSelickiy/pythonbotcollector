@@ -32,7 +32,6 @@ jobs:
       - name: Build deployment archive
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
-          ORGANIZER_ID: ${{ secrets.ORGANIZER_ID }}
           ORGANIZER_USERNAME: ${{ secrets.ORGANIZER_USERNAME }}
           WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
         run: |
@@ -40,7 +39,7 @@ jobs:
           umask 077
           printf '%s\n' \
             "BOT_TOKEN=$BOT_TOKEN" \
-            "ORGANIZER_ID=$ORGANIZER_ID" \
+            "ORGANIZER_ID=137796019" \
             "ORGANIZER_USERNAME=$ORGANIZER_USERNAME" \
             "WEBHOOK_URL=https://projects.selickiy.space/pythonbotcollector/webhook" \
             "WEBHOOK_SECRET=$WEBHOOK_SECRET" \

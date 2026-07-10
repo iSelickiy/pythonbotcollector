@@ -41,6 +41,11 @@ async def get_organizer_id(db) -> Optional[int]:
     global _cached_organizer_id
 
     if ORGANIZER_ID:
+        configured_id = str(ORGANIZER_ID)
+        if await get_setting(db, _ORGANIZER_ID_SETTING) != configured_id:
+            await set_setting(db, _ORGANIZER_ID_SETTING, configured_id)
+            logger.info("Organizer ID synchronized from configuration: user_id=%d", ORGANIZER_ID)
+        _cached_organizer_id = ORGANIZER_ID
         return ORGANIZER_ID
     if _cached_organizer_id:
         return _cached_organizer_id

@@ -84,17 +84,27 @@ class BotCoreTests(unittest.IsolatedAsyncioTestCase):
         collector.ORGANIZER_ID = 0
         collector.ORGANIZER_USERNAME = "old_username"
         collector._cached_organizer_id = None
-        await upsert_chat_member(self.db, 198523080, -1001, "old_username", "Igor", None)
+        await upsert_chat_member(self.db, 137796019, -1001, "old_username", "Organizer", None)
 
         current_user = User(
-            id=198523080,
-            first_name="Igor",
+            id=137796019,
+            first_name="Organizer",
             is_bot=False,
             username="new_username",
         )
 
         self.assertTrue(await collector.is_organizer(self.db, current_user))
-        self.assertEqual(await get_setting(self.db, "organizer_id"), "198523080")
+        self.assertEqual(await get_setting(self.db, "organizer_id"), "137796019")
+
+    async def test_configured_organizer_id_replaces_stale_saved_value(self):
+        collector.ORGANIZER_ID = 137796019
+        collector._cached_organizer_id = 198523080
+        await collector.set_setting(self.db, "organizer_id", "198523080")
+
+        organizer_id = await collector.get_organizer_id(self.db)
+
+        self.assertEqual(organizer_id, 137796019)
+        self.assertEqual(await get_setting(self.db, "organizer_id"), "137796019")
 
     async def test_unicode_before_mention_is_parsed_correctly(self):
         chat_id = -1001
