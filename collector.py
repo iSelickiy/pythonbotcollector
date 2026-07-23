@@ -1,5 +1,6 @@
 import html
 import logging
+import random
 import re
 import unicodedata
 from typing import Optional, Set
@@ -219,8 +220,28 @@ async def extract_and_store_users(db, message: Message, chat_id: int) -> int:
     return stored_count
 
 
-async def handle_collection_message(message: Message, chat_id: int):
-    """Create or refresh one chat's collection, preserving paid state on edits."""
+COLLECTION_STARTED_PHRASES = (
+    "⚽💰 Сбор открыт! Реагируйте на сообщение — я слежу за каждым, я всё-таки коллектор.",
+    "Новый сбор стартовал. Поле забронировано, осталось забронировать вашу совесть на оплату.",
+    "Внимание, деньги любят счёт, а я люблю реакции на это сообщение. Погнали!",
+    "Сбор в деле! Кто не поставит реакцию до игры — весь матч слышит от меня «а денежку?».",
+    "Официально: касса открыта. Я не банк, но памятью на должников не уступлю.",
+    "Мяч круглый, поле большое, а сбор — уже активен. Не тяните с оплатой до свистка.",
+    "Новый сбор запущен! Я коллектор не только по имени — буду вежливо, но упорно стучаться за оплатой.",
+    "Всё, сбор пошёл! Реакция на это сообщение = ты в игре. Без неё — только на трибуне должников.",
+)
+
+
+def get_collection_started_message() -> str:
+    return random.choice(COLLECTION_STARTED_PHRASES)
+
+
+async def handle_collection_message(message: Message, chat_id: int) -> bool:
+    """Create or refresh one chat's collection, preserving paid state on edits.
+
+    Returns True if this created a brand-new collection (as opposed to
+    refreshing the currently active one), so callers can announce the start.
+    """
     db = await get_connection()
     existing = await get_active_collection(db, chat_id)
     same_message = bool(existing and existing["message_id"] == message.message_id)
@@ -245,6 +266,8 @@ async def handle_collection_message(message: Message, chat_id: int):
         chat_id,
         count,
     )
+
+    return not same_message
 
 
 async def handle_reaction_update(
@@ -287,7 +310,51 @@ async def handle_reaction_update(
     )
 
 
-async def build_reminder_text(db, chat_id: int) -> Optional[str]:
+STAGE_GENTLE = "gentle"
+STAGE_FIRM = "firm"
+STAGE_FINAL = "final"
+
+REMINDER_PHRASES = {
+    STAGE_GENTLE: (
+        "Так, по-хорошему напоминаю: сбор ещё открыт, а вот совесть некоторых — нет.",
+        "Коллектор снова на связи. Пока вежливо: закиньте, будьте людьми.",
+        "Первое напоминание, ещё доброе. Второе будет с меньшим терпением.",
+        "Сбор не закрылся сам, и я тоже не закроюсь, пока не увижу оплату.",
+        "Тук-тук, это я, ваш любимый коллектор. Пока ещё вежливый.",
+        "Небольшое дружеское: деньги сами себя не переведут.",
+    ),
+    STAGE_FIRM: (
+        "Доброе утро! У кого-то оно будет добрым только после перевода.",
+        "Второй раз напоминаю, вежливость на исходе, как и моё терпение.",
+        "Утро, кофе, немного дисциплины — переведите уже, а?",
+        "Я коллектор, не будильник, но раз уж разбудил — заодно и оплатите.",
+        "Список неплательщиков не худеет сам по себе, помогите мне с этим.",
+        "Ещё один шанс сделать всё по-хорошему. Использовать рекомендую.",
+    ),
+    STAGE_FINAL: (
+        "Последнее предупреждение! Дальше я передаю дело в отдел «сам разбирайся на поле».",
+        "Финальный созвон должников — сбор скоро закрываю, но память у меня хорошая.",
+        "Терпение коллектора закончилось. Кто не оплатил — играет с чувством вины в основе.",
+        "Это не напоминание, это ультиматум с мячом на кону.",
+        "Последний раз по-доброму: оплатите, а то в следующий раз тегать буду капсом.",
+        "Всё, я закрываю сбор. Кто не успел — тот, как обычно, попал в историю чата навсегда.",
+    ),
+}
+
+
+def get_reminder_message(stage: str) -> str:
+    return random.choice(REMINDER_PHRASES[stage])
+
+
+def build_message_link(chat_id: int, message_id: int) -> Optional[str]:
+    """Build a t.me deep link to a message, for supergroups/channels (chat_id starts with -100)."""
+    chat_part = str(chat_id)
+    if not chat_part.startswith("-100"):
+        return None
+    return f"https://t.me/c/{chat_part[4:]}/{message_id}"
+
+
+async def build_reminder_text(db, chat_id: int, message_id: int, stage: str) -> Optional[str]:
     unpaid = await get_unpaid_members(db, chat_id)
     if not unpaid:
         return None
@@ -302,17 +369,23 @@ async def build_reminder_text(db, chat_id: int) -> Optional[str]:
         else:
             lines.append(html.escape(member.get("display_name") or "??", quote=False))
 
-    return f"Напоминаю про оплату!\n{', '.join(lines)}"
+    text = f"{get_reminder_message(stage)}\n{', '.join(lines)}"
+
+    link = build_message_link(chat_id, message_id)
+    if link:
+        text += f'\n\n<a href="{link}">📌 Сообщение со сбором</a>'
+
+    return text
 
 
-async def send_reminder(context: ContextTypes.DEFAULT_TYPE, reset_after: bool = False):
+async def send_reminder(context: ContextTypes.DEFAULT_TYPE, stage: str, reset_after: bool = False):
     """Send reminders for every chat that currently has an active collection."""
     db = await get_connection()
     collections = await get_active_collections(db)
 
     for collection in collections:
         chat_id = collection["chat_id"]
-        text = await build_reminder_text(db, chat_id)
+        text = await build_reminder_text(db, chat_id, collection["message_id"], stage)
         if text is None:
             await clear_collection(db, chat_id)
             logger.info("Collection cleared in chat %d (all paid)", chat_id)
@@ -334,6 +407,13 @@ async def send_reminder(context: ContextTypes.DEFAULT_TYPE, reset_after: bool = 
             logger.info("Collection cleared in chat %d after Friday 15:00 reminder", chat_id)
 
 
+def _member_label(member: dict) -> str:
+    """Prefer a real @username tag over the stored display name."""
+    if member.get("username"):
+        return f"@{member['username']}"
+    return member.get("display_name") or str(member.get("user_id", "?"))
+
+
 async def get_status_text(db, chat_id: int) -> str:
     collection = await get_active_collection(db, chat_id)
     if collection is None:
@@ -346,12 +426,10 @@ async def get_status_text(db, chat_id: int) -> str:
     lines = [f"Активный сбор (сообщение #{collection['message_id']}):"]
     lines.append(f"\nОплатили ({len(paid)}):")
     for member in paid:
-        name = member.get("display_name") or member.get("username") or str(member.get("user_id", "?"))
-        lines.append(f"  ✅ {name}")
+        lines.append(f"  ✅ {_member_label(member)}")
 
     lines.append(f"\nНе оплатили ({len(unpaid)}):")
     for member in unpaid:
-        name = member.get("display_name") or member.get("username") or str(member.get("user_id", "?"))
-        lines.append(f"  ❌ {name}")
+        lines.append(f"  ❌ {_member_label(member)}")
 
     return "\n".join(lines)

@@ -30,9 +30,13 @@ from collector import (
     handle_collection_message,
     handle_reaction_update,
     get_organizer_id,
+    get_collection_started_message,
     is_organizer,
     send_reminder,
     get_status_text,
+    STAGE_GENTLE,
+    STAGE_FIRM,
+    STAGE_FINAL,
 )
 
 logging.basicConfig(
@@ -72,7 +76,9 @@ async def on_message(update, context: ContextTypes.DEFAULT_TYPE):
     organizer = await is_organizer(db, user)
     if organizer and has_collection_link(message):
         logger.info("Collection message detected from organizer in chat %d (edit=%s)", chat_id, is_edit)
-        await handle_collection_message(message, chat_id)
+        is_new_collection = await handle_collection_message(message, chat_id)
+        if is_new_collection:
+            await message.reply_text(get_collection_started_message())
     elif organizer and is_edit:
         collection = await get_active_collection(db, chat_id)
         if collection and collection["message_id"] == message.message_id:
@@ -125,17 +131,17 @@ async def cmd_reset(update, context: ContextTypes.DEFAULT_TYPE):
 
 async def remind_thursday(context: ContextTypes.DEFAULT_TYPE):
     logger.info("Thursday 22:00 MSK reminder triggered")
-    await send_reminder(context, reset_after=False)
+    await send_reminder(context, stage=STAGE_GENTLE, reset_after=False)
 
 
 async def remind_friday_morning(context: ContextTypes.DEFAULT_TYPE):
     logger.info("Friday 09:00 MSK reminder triggered")
-    await send_reminder(context, reset_after=False)
+    await send_reminder(context, stage=STAGE_FIRM, reset_after=False)
 
 
 async def remind_friday_afternoon(context: ContextTypes.DEFAULT_TYPE):
     logger.info("Friday 15:00 MSK reminder triggered")
-    await send_reminder(context, reset_after=True)
+    await send_reminder(context, stage=STAGE_FINAL, reset_after=True)
 
 
 def setup_jobs(application: Application):

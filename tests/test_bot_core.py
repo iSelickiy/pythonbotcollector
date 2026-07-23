@@ -155,6 +155,59 @@ class BotCoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(members), 1)
         self.assertEqual(members[0]["paid"], 1)
 
+    async def test_status_prefers_username_tag_over_display_name(self):
+        chat_id = -1001
+        await create_collection(self.db, message_id=10, chat_id=chat_id)
+        await add_collection_member(self.db, chat_id, 42, "playercase", "Vasily")
+
+        text = await collector.get_status_text(self.db, chat_id)
+
+        self.assertIn("@playercase", text)
+        self.assertNotIn("Vasily", text)
+
+    async def test_handle_collection_message_reports_whether_it_started_a_new_collection(self):
+        chat_id = -1001
+        sender = User(id=7, first_name="Organizer", is_bot=False, username="organizer")
+        message = _message_with_mention(
+            message_id=10,
+            chat_id=chat_id,
+            sender=sender,
+            text="Сбор @player https://tbank.ru/example",
+            mention="@player",
+        )
+
+        self.assertTrue(await collector.handle_collection_message(message, chat_id))
+        self.assertFalse(await collector.handle_collection_message(message, chat_id))
+
+    def test_collection_started_message_is_one_of_the_configured_phrases(self):
+        self.assertIn(collector.get_collection_started_message(), collector.COLLECTION_STARTED_PHRASES)
+
+    async def test_build_reminder_text_includes_stage_phrase_and_message_link(self):
+        chat_id = -1002102186488
+        await create_collection(self.db, message_id=9430, chat_id=chat_id)
+        await add_collection_member(self.db, chat_id, 42, "unpaidguy", "Unpaid Guy")
+
+        text = await collector.build_reminder_text(self.db, chat_id, 9430, collector.STAGE_FINAL)
+
+        self.assertIn("@unpaidguy", text)
+        self.assertIn("https://t.me/c/2102186488/9430", text)
+        self.assertTrue(any(phrase in text for phrase in collector.REMINDER_PHRASES[collector.STAGE_FINAL]))
+
+    def test_build_message_link_strips_supergroup_prefix(self):
+        self.assertEqual(
+            collector.build_message_link(-1002102186488, 9430),
+            "https://t.me/c/2102186488/9430",
+        )
+
+    def test_build_message_link_returns_none_for_a_private_chat(self):
+        self.assertIsNone(collector.build_message_link(137796019, 10))
+
+    def test_reminder_message_is_one_of_the_configured_phrases_for_stage(self):
+        self.assertIn(
+            collector.get_reminder_message(collector.STAGE_GENTLE),
+            collector.REMINDER_PHRASES[collector.STAGE_GENTLE],
+        )
+
     def test_error_handler_is_async(self):
         self.assertTrue(inspect.iscoroutinefunction(on_error))
 
