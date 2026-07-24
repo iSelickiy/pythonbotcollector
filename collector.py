@@ -378,6 +378,31 @@ async def build_reminder_text(db, chat_id: int, message_id: int, stage: str) -> 
     return text
 
 
+ALL_PAID_PHRASES_WITH_WISH = (
+    "Все скинулись, красавчики! 💪 Хорошей игры!",
+    "Касса закрыта, все оплатили — можно выдыхать. Хорошей игры!",
+    "Ни одного должника! Коллектор доволен и даже улыбается. Хорошей игры!",
+    "Сбор закрыт, все при деньгах, молодцы. Хорошей игры, до встречи на поле!",
+    "Чудо случилось — все оплатили без единого лишнего напоминания. Хорошей игры!",
+    "Все переводы дошли, коллектор уходит отдыхать. Хорошей игры!",
+)
+
+ALL_PAID_PHRASES_NO_WISH = (
+    "Ну наконец-то, все скинулись. В последний момент, но принято.",
+    "Все оплатили. Коллектор выдыхает, но виду не подаёт.",
+    "Деньги собраны все до одного. Уложились впритык, но уложились.",
+    "Сбор закрыт: все заплатили. В следующий раз можно и пораньше.",
+    "Все при оплате, отдел коллекторов закрывает дело без лишних слов.",
+    "Последние переводы долетели вовремя. Сбор закрыт.",
+)
+
+
+def get_all_paid_message(stage: str) -> str:
+    if stage == STAGE_FINAL:
+        return random.choice(ALL_PAID_PHRASES_NO_WISH)
+    return random.choice(ALL_PAID_PHRASES_WITH_WISH)
+
+
 async def send_reminder(context: ContextTypes.DEFAULT_TYPE, stage: str, reset_after: bool = False):
     """Send reminders for every chat that currently has an active collection."""
     db = await get_connection()
@@ -387,6 +412,15 @@ async def send_reminder(context: ContextTypes.DEFAULT_TYPE, stage: str, reset_af
         chat_id = collection["chat_id"]
         text = await build_reminder_text(db, chat_id, collection["message_id"], stage)
         if text is None:
+            try:
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=get_all_paid_message(stage),
+                    reply_to_message_id=collection["message_id"],
+                )
+                logger.info("All-paid message sent to chat %d", chat_id)
+            except Exception:
+                logger.exception("Failed to send all-paid message to chat %d", chat_id)
             await clear_collection(db, chat_id)
             logger.info("Collection cleared in chat %d (all paid)", chat_id)
             continue

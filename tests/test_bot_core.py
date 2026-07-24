@@ -4,6 +4,7 @@ import sqlite3
 import tempfile
 import unittest
 from datetime import datetime, timezone
+from unittest.mock import AsyncMock, MagicMock
 
 os.environ.setdefault("BOT_TOKEN", "123456:test-token")
 
@@ -16,6 +17,7 @@ from storage import (
     clear_collection,
     close_connection,
     create_collection,
+    find_members_by_name,
     get_active_collection,
     get_all_collection_members,
     get_connection,
@@ -207,6 +209,89 @@ class BotCoreTests(unittest.IsolatedAsyncioTestCase):
             collector.get_reminder_message(collector.STAGE_GENTLE),
             collector.REMINDER_PHRASES[collector.STAGE_GENTLE],
         )
+
+    async def test_find_members_by_name_requires_exact_match_not_substring(self):
+        chat_id = -1001
+        await upsert_chat_member(self.db, 42, chat_id, "vvp969", "Филипп", "Москалёв")
+
+        exact = await find_members_by_name(self.db, chat_id, "филипп")
+        self.assertEqual([m["user_id"] for m in exact], [42])
+
+        # "или" is a common word that happens to appear inside "Филипп" —
+        # it must not match, or an uninvolved person gets pulled into a collection.
+        substring_collision = await find_members_by_name(self.db, chat_id, "или")
+        self.assertEqual(substring_collision, [])
+
+    async def test_extract_and_store_users_ignores_common_word_inside_a_name(self):
+        chat_id = -1001
+        await upsert_chat_member(self.db, 42, chat_id, "vvp969", "Филипп", "Москалёв")
+        sender = User(id=7, first_name="Organizer", is_bot=False, username="organizer")
+        message = Message(
+            message_id=10,
+            date=datetime.now(timezone.utc),
+            chat=Chat(chat_id, Chat.SUPERGROUP),
+            from_user=sender,
+            text="Сбор в четверг или в пятницу, как получится https://tbank.ru/example",
+        )
+
+        count = await collector.extract_and_store_users(self.db, message, chat_id)
+
+        self.assertEqual(count, 0)
+        self.assertEqual(await get_all_collection_members(self.db, chat_id), [])
+
+    async def test_send_reminder_sends_nag_text_when_someone_unpaid(self):
+        chat_id = -1002102186488
+        await create_collection(self.db, message_id=9430, chat_id=chat_id)
+        await add_collection_member(self.db, chat_id, 42, "unpaidguy", "Unpaid Guy")
+
+        context = MagicMock()
+        context.bot.send_message = AsyncMock()
+
+        await collector.send_reminder(context, stage=collector.STAGE_GENTLE)
+
+        sent_text = context.bot.send_message.call_args.kwargs["text"]
+        self.assertIn("@unpaidguy", sent_text)
+        self.assertIsNotNone(await get_active_collection(self.db, chat_id))
+
+    async def test_send_reminder_sends_all_paid_message_with_wish_before_final_stage(self):
+        chat_id = -1002102186488
+        await create_collection(self.db, message_id=9430, chat_id=chat_id)
+        await add_collection_member(self.db, chat_id, 42, "paidguy", "Paid Guy")
+        member = (await get_all_collection_members(self.db, chat_id))[0]
+        await mark_paid(self.db, member["id"], True)
+
+        context = MagicMock()
+        context.bot.send_message = AsyncMock()
+
+        await collector.send_reminder(context, stage=collector.STAGE_FIRM)
+
+        sent_text = context.bot.send_message.call_args.kwargs["text"]
+        self.assertIn(sent_text, collector.ALL_PAID_PHRASES_WITH_WISH)
+        self.assertIsNone(await get_active_collection(self.db, chat_id))
+
+    async def test_send_reminder_sends_all_paid_message_without_wish_on_final_stage(self):
+        chat_id = -1002102186488
+        await create_collection(self.db, message_id=9430, chat_id=chat_id)
+        await add_collection_member(self.db, chat_id, 42, "paidguy", "Paid Guy")
+        member = (await get_all_collection_members(self.db, chat_id))[0]
+        await mark_paid(self.db, member["id"], True)
+
+        context = MagicMock()
+        context.bot.send_message = AsyncMock()
+
+        await collector.send_reminder(context, stage=collector.STAGE_FINAL, reset_after=True)
+
+        sent_text = context.bot.send_message.call_args.kwargs["text"]
+        self.assertIn(sent_text, collector.ALL_PAID_PHRASES_NO_WISH)
+        self.assertIsNone(await get_active_collection(self.db, chat_id))
+
+    async def test_send_reminder_sends_nothing_once_collection_already_cleared(self):
+        context = MagicMock()
+        context.bot.send_message = AsyncMock()
+
+        await collector.send_reminder(context, stage=collector.STAGE_FIRM)
+
+        context.bot.send_message.assert_not_called()
 
     def test_error_handler_is_async(self):
         self.assertTrue(inspect.iscoroutinefunction(on_error))

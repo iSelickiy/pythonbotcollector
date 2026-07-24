@@ -178,21 +178,27 @@ async def upsert_chat_member(
 
 
 async def find_members_by_name(db: aiosqlite.Connection, chat_id: int, name_part: str) -> List[dict]:
+    """Match a plain-text token against known members by exact name/username.
+
+    Must be an exact match, not a substring: a short common word (e.g. "или")
+    can otherwise accidentally match inside an unrelated first/last name and
+    wrongly pull an uninvolved person into a collection.
+    """
     if len(name_part) < 3:
         return []
-    like = f"%{name_part.lower()}%"
+    name = name_part.lower()
     cursor = await db.execute(
         """
         SELECT user_id, username, first_name, last_name
         FROM chat_members
         WHERE chat_id = ?
           AND (
-              LOWER(COALESCE(username, '')) LIKE ?
-              OR LOWER(COALESCE(first_name, '')) LIKE ?
-              OR LOWER(COALESCE(last_name, '')) LIKE ?
+              LOWER(COALESCE(username, '')) = ?
+              OR LOWER(COALESCE(first_name, '')) = ?
+              OR LOWER(COALESCE(last_name, '')) = ?
           )
         """,
-        (chat_id, like, like, like),
+        (chat_id, name, name, name),
     )
     return [dict(row) for row in await cursor.fetchall()]
 
