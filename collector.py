@@ -3,7 +3,9 @@ import logging
 import random
 import re
 import unicodedata
+from datetime import datetime
 from typing import Optional, Set
+from zoneinfo import ZoneInfo
 
 from telegram import Message, User
 from telegram.ext import ContextTypes
@@ -32,6 +34,8 @@ from storage import (
 )
 
 logger = logging.getLogger(__name__)
+
+_MSK = ZoneInfo("Europe/Moscow")
 
 _ORGANIZER_ID_SETTING = "organizer_id"
 _cached_organizer_id: Optional[int] = ORGANIZER_ID or None
@@ -94,6 +98,16 @@ async def is_organizer(db, user: Optional[User]) -> bool:
         return True
 
     return False
+
+
+async def get_organizer_mention(db) -> str:
+    """A tag/link for the organizer, to call them out by name in a message."""
+    if ORGANIZER_USERNAME:
+        return f"@{ORGANIZER_USERNAME}"
+    organizer_id = await get_organizer_id(db)
+    if organizer_id:
+        return f'<a href="tg://user?id={organizer_id}">организатору</a>'
+    return "организатору"
 
 
 def has_collection_link(message: Message) -> bool:
@@ -271,6 +285,7 @@ async def handle_collection_message(message: Message, chat_id: int) -> bool:
 
 
 async def handle_reaction_update(
+    context: ContextTypes.DEFAULT_TYPE,
     chat_id: int,
     message_id: int,
     user: Optional[User],
@@ -309,6 +324,9 @@ async def handle_reaction_update(
         chat_id,
     )
 
+    if paid and not await get_unpaid_members(db, chat_id):
+        await announce_collection_complete(context, chat_id, message_id)
+
 
 STAGE_GENTLE = "gentle"
 STAGE_FIRM = "firm"
@@ -332,12 +350,12 @@ REMINDER_PHRASES = {
         "Ещё один шанс сделать всё по-хорошему. Использовать рекомендую.",
     ),
     STAGE_FINAL: (
-        "Последнее предупреждение! Дальше я передаю дело в отдел «сам разбирайся на поле».",
-        "Финальный созвон должников — сбор скоро закрываю, но память у меня хорошая.",
-        "Терпение коллектора закончилось. Кто не оплатил — играет с чувством вины в основе.",
-        "Это не напоминание, это ультиматум с мячом на кону.",
-        "Последний раз по-доброму: оплатите, а то в следующий раз тегать буду капсом.",
-        "Всё, я закрываю сбор. Кто не успел — тот, как обычно, попал в историю чата навсегда.",
+        "Всё, я сдаюсь — не мой уровень воздействия. {organizer}, забирай, дальше пусть кожаный разбирается лично.",
+        "Терпение коллектора закончилось безвозвратно. Передаю должников {organizer} — с живым человеком аргумент «забыл» уже не прокатит.",
+        "Я слишком вежливый бот для этого разговора. {organizer}, включай кожаное обаяние, я пас.",
+        "Официально прекращаю попытки. {organizer}, эти люди твои — у ботов на них иммунитет выработался.",
+        "Финальное предупреждение закончилось ничем, как обычно. {organizer}, дальше сам, я передаю дело кожаному.",
+        "Всё, сдаю пост. {organizer}, лично разберись — на роботов эти должники давно забили.",
     ),
 }
 
@@ -369,7 +387,11 @@ async def build_reminder_text(db, chat_id: int, message_id: int, stage: str) -> 
         else:
             lines.append(html.escape(member.get("display_name") or "??", quote=False))
 
-    text = f"{get_reminder_message(stage)}\n{', '.join(lines)}"
+    intro = get_reminder_message(stage)
+    if stage == STAGE_FINAL:
+        intro = intro.format(organizer=await get_organizer_mention(db))
+
+    text = f"{intro}\n{', '.join(lines)}"
 
     link = build_message_link(chat_id, message_id)
     if link:
@@ -388,19 +410,40 @@ ALL_PAID_PHRASES_WITH_WISH = (
 )
 
 ALL_PAID_PHRASES_NO_WISH = (
-    "Ну наконец-то, все скинулись. В последний момент, но принято.",
-    "Все оплатили. Коллектор выдыхает, но виду не подаёт.",
-    "Деньги собраны все до одного. Уложились впритык, но уложились.",
-    "Сбор закрыт: все заплатили. В следующий раз можно и пораньше.",
-    "Все при оплате, отдел коллекторов закрывает дело без лишних слов.",
-    "Последние переводы долетели вовремя. Сбор закрыт.",
+    "Сбор завершён, все скинулись. Спасибо всем!",
+    "Готово — все оплатили. Всем спасибо, красавчики.",
+    "Сбор закрыт, деньги все на месте. Спасибо, что не пришлось никого пинать... почти.",
+    "Все при оплате. Сбор завершён, спасибо каждому.",
+    "Финиш! Все скинулись, сбор закрыт. Всем спасибо.",
+    "Деньги собраны полностью. Сбор завершён, спасибо всем участникам.",
 )
 
+_ALL_PAID_WISH_CUTOFF = (9, 30)
 
-def get_all_paid_message(stage: str) -> str:
-    if stage == STAGE_FINAL:
-        return random.choice(ALL_PAID_PHRASES_NO_WISH)
-    return random.choice(ALL_PAID_PHRASES_WITH_WISH)
+
+def get_all_paid_message(now: Optional[datetime] = None) -> str:
+    """Pick an all-paid message: cheerful with a game wish before 9:30 MSK, plain thanks after."""
+    if now is None:
+        now = datetime.now(_MSK)
+    if (now.hour, now.minute) < _ALL_PAID_WISH_CUTOFF:
+        return random.choice(ALL_PAID_PHRASES_WITH_WISH)
+    return random.choice(ALL_PAID_PHRASES_NO_WISH)
+
+
+async def announce_collection_complete(context: ContextTypes.DEFAULT_TYPE, chat_id: int, message_id: int):
+    """Announce that a collection just became fully paid, then clear it."""
+    db = await get_connection()
+    try:
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=get_all_paid_message(),
+            reply_to_message_id=message_id,
+        )
+        logger.info("All-paid message sent to chat %d", chat_id)
+    except Exception:
+        logger.exception("Failed to send all-paid message to chat %d", chat_id)
+    await clear_collection(db, chat_id)
+    logger.info("Collection cleared in chat %d (all paid)", chat_id)
 
 
 async def send_reminder(context: ContextTypes.DEFAULT_TYPE, stage: str, reset_after: bool = False):
@@ -412,17 +455,9 @@ async def send_reminder(context: ContextTypes.DEFAULT_TYPE, stage: str, reset_af
         chat_id = collection["chat_id"]
         text = await build_reminder_text(db, chat_id, collection["message_id"], stage)
         if text is None:
-            try:
-                await context.bot.send_message(
-                    chat_id=chat_id,
-                    text=get_all_paid_message(stage),
-                    reply_to_message_id=collection["message_id"],
-                )
-                logger.info("All-paid message sent to chat %d", chat_id)
-            except Exception:
-                logger.exception("Failed to send all-paid message to chat %d", chat_id)
-            await clear_collection(db, chat_id)
-            logger.info("Collection cleared in chat %d (all paid)", chat_id)
+            # Normally already handled reactively the moment the last person
+            # paid (see handle_reaction_update) — this is just a safety net.
+            await announce_collection_complete(context, chat_id, collection["message_id"])
             continue
 
         try:

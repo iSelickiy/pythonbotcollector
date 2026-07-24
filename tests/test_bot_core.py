@@ -189,11 +189,23 @@ class BotCoreTests(unittest.IsolatedAsyncioTestCase):
         await create_collection(self.db, message_id=9430, chat_id=chat_id)
         await add_collection_member(self.db, chat_id, 42, "unpaidguy", "Unpaid Guy")
 
-        text = await collector.build_reminder_text(self.db, chat_id, 9430, collector.STAGE_FINAL)
+        text = await collector.build_reminder_text(self.db, chat_id, 9430, collector.STAGE_GENTLE)
 
         self.assertIn("@unpaidguy", text)
         self.assertIn("https://t.me/c/2102186488/9430", text)
-        self.assertTrue(any(phrase in text for phrase in collector.REMINDER_PHRASES[collector.STAGE_FINAL]))
+        self.assertTrue(any(phrase in text for phrase in collector.REMINDER_PHRASES[collector.STAGE_GENTLE]))
+
+    async def test_build_reminder_text_final_stage_mentions_organizer(self):
+        collector.ORGANIZER_USERNAME = "seankalejs"
+        chat_id = -1002102186488
+        await create_collection(self.db, message_id=9430, chat_id=chat_id)
+        await add_collection_member(self.db, chat_id, 42, "unpaidguy", "Unpaid Guy")
+
+        text = await collector.build_reminder_text(self.db, chat_id, 9430, collector.STAGE_FINAL)
+
+        self.assertIn("@seankalejs", text)
+        self.assertIn("@unpaidguy", text)
+        self.assertNotIn("{organizer}", text)
 
     def test_build_message_link_strips_supergroup_prefix(self):
         self.assertEqual(
@@ -253,7 +265,15 @@ class BotCoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("@unpaidguy", sent_text)
         self.assertIsNotNone(await get_active_collection(self.db, chat_id))
 
-    async def test_send_reminder_sends_all_paid_message_with_wish_before_final_stage(self):
+    def test_get_all_paid_message_before_930_msk_wishes_a_good_game(self):
+        before_cutoff = datetime(2026, 7, 24, 9, 29, tzinfo=collector._MSK)
+        self.assertIn(collector.get_all_paid_message(before_cutoff), collector.ALL_PAID_PHRASES_WITH_WISH)
+
+    def test_get_all_paid_message_at_or_after_930_msk_is_plain_thanks(self):
+        at_cutoff = datetime(2026, 7, 24, 9, 30, tzinfo=collector._MSK)
+        self.assertIn(collector.get_all_paid_message(at_cutoff), collector.ALL_PAID_PHRASES_NO_WISH)
+
+    async def test_send_reminder_announces_completion_as_a_fallback_when_all_paid(self):
         chat_id = -1002102186488
         await create_collection(self.db, message_id=9430, chat_id=chat_id)
         await add_collection_member(self.db, chat_id, 42, "paidguy", "Paid Guy")
@@ -266,24 +286,53 @@ class BotCoreTests(unittest.IsolatedAsyncioTestCase):
         await collector.send_reminder(context, stage=collector.STAGE_FIRM)
 
         sent_text = context.bot.send_message.call_args.kwargs["text"]
-        self.assertIn(sent_text, collector.ALL_PAID_PHRASES_WITH_WISH)
+        self.assertIn(sent_text, collector.ALL_PAID_PHRASES_WITH_WISH + collector.ALL_PAID_PHRASES_NO_WISH)
         self.assertIsNone(await get_active_collection(self.db, chat_id))
 
-    async def test_send_reminder_sends_all_paid_message_without_wish_on_final_stage(self):
+    async def test_handle_reaction_update_announces_completion_when_last_member_pays(self):
         chat_id = -1002102186488
         await create_collection(self.db, message_id=9430, chat_id=chat_id)
-        await add_collection_member(self.db, chat_id, 42, "paidguy", "Paid Guy")
-        member = (await get_all_collection_members(self.db, chat_id))[0]
-        await mark_paid(self.db, member["id"], True)
+        await add_collection_member(self.db, chat_id, 42, "lastguy", "Last Guy")
+        user = User(id=42, first_name="Last", is_bot=False, username="lastguy")
 
         context = MagicMock()
         context.bot.send_message = AsyncMock()
 
-        await collector.send_reminder(context, stage=collector.STAGE_FINAL, reset_after=True)
+        await collector.handle_reaction_update(
+            context=context,
+            chat_id=chat_id,
+            message_id=9430,
+            user=user,
+            new_reaction=["👍"],
+            old_reaction=[],
+        )
 
+        context.bot.send_message.assert_called_once()
         sent_text = context.bot.send_message.call_args.kwargs["text"]
-        self.assertIn(sent_text, collector.ALL_PAID_PHRASES_NO_WISH)
+        self.assertIn(sent_text, collector.ALL_PAID_PHRASES_WITH_WISH + collector.ALL_PAID_PHRASES_NO_WISH)
         self.assertIsNone(await get_active_collection(self.db, chat_id))
+
+    async def test_handle_reaction_update_does_not_announce_while_someone_still_unpaid(self):
+        chat_id = -1002102186488
+        await create_collection(self.db, message_id=9430, chat_id=chat_id)
+        await add_collection_member(self.db, chat_id, 42, "payer", "Payer")
+        await add_collection_member(self.db, chat_id, 43, "stillowes", "Still Owes")
+        user = User(id=42, first_name="Payer", is_bot=False, username="payer")
+
+        context = MagicMock()
+        context.bot.send_message = AsyncMock()
+
+        await collector.handle_reaction_update(
+            context=context,
+            chat_id=chat_id,
+            message_id=9430,
+            user=user,
+            new_reaction=["👍"],
+            old_reaction=[],
+        )
+
+        context.bot.send_message.assert_not_called()
+        self.assertIsNotNone(await get_active_collection(self.db, chat_id))
 
     async def test_send_reminder_sends_nothing_once_collection_already_cleared(self):
         context = MagicMock()

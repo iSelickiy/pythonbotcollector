@@ -94,6 +94,7 @@ async def on_reaction(update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     await handle_reaction_update(
+        context=context,
         chat_id=reaction.chat.id,
         message_id=reaction.message_id,
         user=reaction.user,
