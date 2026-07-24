@@ -183,24 +183,23 @@ async def find_members_by_name(db: aiosqlite.Connection, chat_id: int, name_part
     Must be an exact match, not a substring: a short common word (e.g. "или")
     can otherwise accidentally match inside an unrelated first/last name and
     wrongly pull an uninvolved person into a collection.
+
+    Compared in Python, not via SQL LOWER(): SQLite's built-in LOWER() only
+    folds ASCII case and leaves Cyrillic (and other non-ASCII) letters as-is,
+    so it would fail to match "Филипп" against "филипп".
     """
     if len(name_part) < 3:
         return []
     name = name_part.lower()
     cursor = await db.execute(
-        """
-        SELECT user_id, username, first_name, last_name
-        FROM chat_members
-        WHERE chat_id = ?
-          AND (
-              LOWER(COALESCE(username, '')) = ?
-              OR LOWER(COALESCE(first_name, '')) = ?
-              OR LOWER(COALESCE(last_name, '')) = ?
-          )
-        """,
-        (chat_id, name, name, name),
+        "SELECT user_id, username, first_name, last_name FROM chat_members WHERE chat_id = ?",
+        (chat_id,),
     )
-    return [dict(row) for row in await cursor.fetchall()]
+    matches = []
+    for row in await cursor.fetchall():
+        if any((row[field] or "").lower() == name for field in ("username", "first_name", "last_name")):
+            matches.append(dict(row))
+    return matches
 
 
 async def get_member_by_username(db: aiosqlite.Connection, chat_id: int, username: str) -> Optional[dict]:
