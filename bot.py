@@ -26,7 +26,8 @@ from storage import (
     upsert_chat_member,
 )
 from collector import (
-    has_collection_link,
+    COLLECTION_CREATED,
+    has_payment_details,
     handle_collection_message,
     handle_reaction_update,
     get_organizer_id,
@@ -73,17 +74,24 @@ async def on_message(update, context: ContextTypes.DEFAULT_TYPE):
         (message.text or message.caption or "")[:80],
     )
 
-    organizer = await is_organizer(db, user)
-    if organizer and has_collection_link(message):
-        logger.info("Collection message detected from organizer in chat %d (edit=%s)", chat_id, is_edit)
-        is_new_collection = await handle_collection_message(message, chat_id)
-        if is_new_collection:
-            await message.reply_text(get_collection_started_message())
-    elif organizer and is_edit:
+    if not await is_organizer(db, user):
+        return
+
+    outcome = None
+    if has_payment_details(message):
+        logger.info("Payment details detected from organizer in chat %d (edit=%s)", chat_id, is_edit)
+        outcome = await handle_collection_message(message, chat_id)
+
+    if outcome == COLLECTION_CREATED:
+        await message.reply_text(get_collection_started_message())
+    elif outcome is None and is_edit:
         collection = await get_active_collection(db, chat_id)
         if collection and collection["message_id"] == message.message_id:
             await clear_collection(db, chat_id)
-            logger.info("Collection cleared in chat %d because the edited message lost its T-Bank link", chat_id)
+            logger.info(
+                "Collection cleared in chat %d: the edited message lost its payment details or participants",
+                chat_id,
+            )
 
 
 # ── reaction handler ──

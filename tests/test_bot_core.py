@@ -1,5 +1,6 @@
 import inspect
 import os
+import re
 import sqlite3
 import tempfile
 import unittest
@@ -8,10 +9,10 @@ from unittest.mock import AsyncMock, MagicMock
 
 os.environ.setdefault("BOT_TOKEN", "123456:test-token")
 
-from telegram import Chat, Message, MessageEntity, User
+from telegram import Chat, Message, MessageEntity, Update, User
 
 import collector
-from bot import on_error
+from bot import on_error, on_message
 from storage import (
     add_collection_member,
     clear_collection,
@@ -49,6 +50,90 @@ def _message_with_mention(
         text=text,
         entities=(entity,),
     )
+
+
+ORGANIZER = User(id=7, first_name="Organizer", is_bot=False, username="organizer")
+
+
+def _message_with_mentions(
+    *, text: str, message_id: int = 10, chat_id: int = -1001, sender: User = ORGANIZER, extra_entities=()
+) -> Message:
+    """A message with every @username tagged as a mention, the way Telegram does it."""
+    mentions = tuple(
+        MessageEntity(
+            type=MessageEntity.MENTION,
+            offset=_utf16_length(text[: match.start()]),
+            length=_utf16_length(match.group()),
+        )
+        for match in re.finditer(r"@\w+", text)
+    )
+    return Message(
+        message_id=message_id,
+        date=datetime.now(timezone.utc),
+        chat=Chat(chat_id, Chat.SUPERGROUP),
+        from_user=sender,
+        text=text,
+        entities=mentions + tuple(extra_entities),
+    )
+
+
+# The organizer's weekly message, with made-up names, phone and link code.
+COLLECTION_TEMPLATE = (
+    "@player_one @player_two (+1 передай, пожалуйста) @player_three @Player_Four \n\n"
+    "С вас по 410 рублей по ссылке или по номеру +79990000000 на Тинек/Сбер:\n"
+    "https://t.tb.ru/pm_short/AbCdEf12345\n\n"
+    "Перевели — поставьте плюс. Нет плюса — нет перевода!"
+)
+TEMPLATE_USERNAMES = {"player_one", "player_two", "player_three", "player_four"}
+
+
+class PaymentDetailsTests(unittest.TestCase):
+    def test_recognizes_the_weekly_message_with_a_t_bank_short_link(self):
+        self.assertTrue(collector.has_payment_details(_message_with_mentions(text=COLLECTION_TEMPLATE)))
+
+    def test_recognizes_every_t_bank_domain(self):
+        for link in (
+            "https://t.tb.ru/pm_short/AbCdEf12345",
+            "HTTPS://T.TB.RU/pm_short/AbCdEf12345",
+            "https://www.tbank.ru/cf/AbCdEf12345",
+            "tbank.ru/cf/AbCdEf12345",
+            "https://www.tinkoff.ru/rm/ivanov.ivan1/AbCdE12345",
+        ):
+            with self.subTest(link=link):
+                message = _message_with_mentions(text=f"@player_one скидываемся: {link}")
+                self.assertTrue(collector.has_payment_details(message))
+
+    def test_recognizes_a_link_hidden_behind_text(self):
+        text = "@player_one скиньте по ссылке"
+        link = MessageEntity(
+            type=MessageEntity.TEXT_LINK,
+            offset=_utf16_length(text[: text.index("ссылке")]),
+            length=_utf16_length("ссылке"),
+            url="https://t.tb.ru/pm_short/AbCdEf12345",
+        )
+
+        self.assertTrue(collector.has_payment_details(_message_with_mentions(text=text, extra_entities=(link,))))
+        self.assertFalse(collector.has_payment_details(_message_with_mentions(text=text)))
+
+    def test_recognizes_a_phone_number_with_an_amount_without_a_t_bank_link(self):
+        for text in (
+            COLLECTION_TEMPLATE.replace("https://t.tb.ru/", "https://pay.example.com/"),
+            "@player_one с вас по 410 рублей по номеру +7 999 000-00-00",
+            "@player_one скиньте 410₽ на 8 (999) 000-00-00",
+        ):
+            with self.subTest(text=text):
+                self.assertTrue(collector.has_payment_details(_message_with_mentions(text=text)))
+
+    def test_ignores_messages_that_do_not_say_where_to_pay(self):
+        for text in (
+            "@player_one глянь https://stb.ru/cf/AbCdEf12345",
+            "@player_one глянь https://tbank.ru.example.com/cf/AbCdEf12345",
+            "@player_one бутсы за 4100 рублей https://market.example.com/boots",
+            "@player_one поле в пятницу, по 410 рублей с человека",
+            "@player_one мой номер +79990000000, звони",
+        ):
+            with self.subTest(text=text):
+                self.assertFalse(collector.has_payment_details(_message_with_mentions(text=text)))
 
 
 class BotCoreTests(unittest.IsolatedAsyncioTestCase):
@@ -122,12 +207,9 @@ class BotCoreTests(unittest.IsolatedAsyncioTestCase):
             mention="@PlayerCase",
         )
 
-        count = await collector.extract_and_store_users(self.db, message, chat_id)
+        participants = await collector.extract_participants(self.db, message, chat_id)
 
-        self.assertEqual(count, 1)
-        members = await get_all_collection_members(self.db, chat_id)
-        self.assertEqual(members[0]["user_id"], 42)
-        self.assertEqual(members[0]["username"], "playercase")
+        self.assertEqual(participants, [(42, "playercase", "Player")])
 
     async def test_editing_same_collection_preserves_paid_state(self):
         chat_id = -1001
@@ -178,8 +260,29 @@ class BotCoreTests(unittest.IsolatedAsyncioTestCase):
             mention="@player",
         )
 
-        self.assertTrue(await collector.handle_collection_message(message, chat_id))
-        self.assertFalse(await collector.handle_collection_message(message, chat_id))
+        self.assertEqual(await collector.handle_collection_message(message, chat_id), collector.COLLECTION_CREATED)
+        self.assertEqual(await collector.handle_collection_message(message, chat_id), collector.COLLECTION_UPDATED)
+
+    async def test_weekly_message_starts_a_collection_for_everyone_it_mentions(self):
+        message = _message_with_mentions(text=COLLECTION_TEMPLATE)
+
+        self.assertEqual(await collector.handle_collection_message(message, -1001), collector.COLLECTION_CREATED)
+
+        members = await get_all_collection_members(self.db, -1001)
+        self.assertEqual({member["username"] for member in members}, TEMPLATE_USERNAMES)
+
+    async def test_payment_details_naming_nobody_leave_the_active_collection_alone(self):
+        await collector.handle_collection_message(_message_with_mentions(text=COLLECTION_TEMPLATE), -1001)
+        member = (await get_all_collection_members(self.db, -1001))[0]
+        await mark_paid(self.db, member["id"], True)
+        answer = _message_with_mentions(message_id=11, text="Сюда: https://t.tb.ru/pm_short/AbCdEf12345")
+
+        self.assertIsNone(await collector.handle_collection_message(answer, -1001))
+
+        self.assertEqual((await get_active_collection(self.db, -1001))["message_id"], 10)
+        members = await get_all_collection_members(self.db, -1001)
+        self.assertEqual(len(members), len(TEMPLATE_USERNAMES))
+        self.assertEqual(sum(member["paid"] for member in members), 1)
 
     def test_collection_started_message_is_one_of_the_configured_phrases(self):
         self.assertIn(collector.get_collection_started_message(), collector.COLLECTION_STARTED_PHRASES)
@@ -234,7 +337,7 @@ class BotCoreTests(unittest.IsolatedAsyncioTestCase):
         substring_collision = await find_members_by_name(self.db, chat_id, "или")
         self.assertEqual(substring_collision, [])
 
-    async def test_extract_and_store_users_ignores_common_word_inside_a_name(self):
+    async def test_extract_participants_ignores_common_word_inside_a_name(self):
         chat_id = -1001
         await upsert_chat_member(self.db, 42, chat_id, "vvp969", "Филипп", "Москалёв")
         sender = User(id=7, first_name="Organizer", is_bot=False, username="organizer")
@@ -246,10 +349,7 @@ class BotCoreTests(unittest.IsolatedAsyncioTestCase):
             text="Сбор в четверг или в пятницу, как получится https://tbank.ru/example",
         )
 
-        count = await collector.extract_and_store_users(self.db, message, chat_id)
-
-        self.assertEqual(count, 0)
-        self.assertEqual(await get_all_collection_members(self.db, chat_id), [])
+        self.assertEqual(await collector.extract_participants(self.db, message, chat_id), [])
 
     async def test_send_reminder_sends_nag_text_when_someone_unpaid(self):
         chat_id = -1002102186488
@@ -341,6 +441,43 @@ class BotCoreTests(unittest.IsolatedAsyncioTestCase):
         await collector.send_reminder(context, stage=collector.STAGE_FIRM)
 
         context.bot.send_message.assert_not_called()
+
+    async def _send_as_organizer(self, message: Message, *, edited: bool = False) -> MagicMock:
+        """Run an organizer's message through on_message; returns the bot, to check replies."""
+        collector.ORGANIZER_ID = ORGANIZER.id
+        bot = MagicMock()
+        bot.send_message = AsyncMock()
+        bot.defaults = None
+        message.set_bot(bot)
+        update = Update(update_id=1, edited_message=message) if edited else Update(update_id=1, message=message)
+        await on_message(update, MagicMock())
+        return bot
+
+    async def test_organizer_posting_the_weekly_message_starts_a_collection(self):
+        bot = await self._send_as_organizer(_message_with_mentions(text=COLLECTION_TEMPLATE))
+
+        bot.send_message.assert_called_once()
+        self.assertIn(bot.send_message.call_args.kwargs["text"], collector.COLLECTION_STARTED_PHRASES)
+        self.assertEqual((await get_active_collection(self.db, -1001))["message_id"], 10)
+
+    async def test_organizer_answering_with_just_the_link_starts_nothing(self):
+        await self._send_as_organizer(_message_with_mentions(text=COLLECTION_TEMPLATE))
+
+        bot = await self._send_as_organizer(
+            _message_with_mentions(message_id=11, text="Сюда: https://t.tb.ru/pm_short/AbCdEf12345")
+        )
+
+        bot.send_message.assert_not_called()
+        self.assertEqual((await get_active_collection(self.db, -1001))["message_id"], 10)
+
+    async def test_editing_the_payment_details_out_of_the_collection_message_clears_it(self):
+        await self._send_as_organizer(_message_with_mentions(text=COLLECTION_TEMPLATE))
+
+        await self._send_as_organizer(
+            _message_with_mentions(text="@player_one @player_two игра отменяется"), edited=True
+        )
+
+        self.assertIsNone(await get_active_collection(self.db, -1001))
 
     def test_error_handler_is_async(self):
         self.assertTrue(inspect.iscoroutinefunction(on_error))

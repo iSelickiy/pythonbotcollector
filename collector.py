@@ -110,9 +110,34 @@ async def get_organizer_mention(db) -> str:
     return "организатору"
 
 
-def has_collection_link(message: Message) -> bool:
-    text = message.text or message.caption or ""
-    return "tbank.ru" in text.lower()
+# T-Bank (ex-Tinkoff) payment links, subdomains included: tbank.ru/cf/…,
+# the pre-rebrand tinkoff.ru/rm/…, short links like t.tb.ru/pm_short/….
+_T_BANK_DOMAINS = ("tbank.ru", "tinkoff.ru", "tb.ru")
+_HOSTNAME_RE = re.compile(r"(?<![\w.-])(?:[a-z0-9-]+\.)+[a-z]{2,}(?![\w-])", re.IGNORECASE)
+# "С вас по 410 рублей … по номеру +7…": the part of the message that
+# survives T-Bank changing its link format yet again.
+_PHONE_RE = re.compile(r"(?<!\d)(?:\+7|8)[\s(-]*\d{3}[\s)-]*\d{3}[\s-]*\d{2}[\s-]*\d{2}(?!\d)")
+_RUBLES_RE = re.compile(r"\d\s*(?:₽|руб|р\b)", re.IGNORECASE)
+
+
+def _is_t_bank_host(host: str) -> bool:
+    host = host.lower()
+    return any(host == domain or host.endswith("." + domain) for domain in _T_BANK_DOMAINS)
+
+
+def has_payment_details(message: Message) -> bool:
+    """Whether a message says where to pay: a T-Bank link, or a phone number plus an amount in rubles.
+
+    Links hidden behind text (text_link entities) count too.
+    """
+    text = "\n".join(filter(None, (message.text, message.caption)))
+    entities = (*(message.entities or ()), *(message.caption_entities or ()))
+    hidden_links = [entity.url for entity in entities if entity.type == "text_link" and entity.url]
+
+    for source in (text, *hidden_links):
+        if any(_is_t_bank_host(host) for host in _HOSTNAME_RE.findall(source)):
+            return True
+    return bool(_PHONE_RE.search(text) and _RUBLES_RE.search(text))
 
 
 def clean_name_token(token: str) -> str:
@@ -144,8 +169,13 @@ def _text_without_entity_ranges(text: str, ranges: list[tuple[int, int]]) -> str
     return "".join(result)
 
 
-async def extract_and_store_users(db, message: Message, chat_id: int) -> int:
-    """Parse mentions and names with correct Telegram UTF-16 entity handling."""
+async def extract_participants(
+    db, message: Message, chat_id: int
+) -> list[tuple[Optional[int], Optional[str], str]]:
+    """Parse mentions and names with correct Telegram UTF-16 entity handling.
+
+    Returns everyone the message names as (user_id, username, display_name).
+    """
     tracked_user_ids: Set[int] = set()
     tracked_usernames: Set[str] = set()
     plain_text_parts = []
@@ -196,7 +226,8 @@ async def extract_and_store_users(db, message: Message, chat_id: int) -> int:
         if member:
             all_user_ids.add(member["user_id"])
 
-    stored_count = 0
+    participants = []
+    resolved_usernames = set()
     for user_id in all_user_ids:
         cursor = await db.execute(
             """
@@ -214,24 +245,14 @@ async def extract_and_store_users(db, message: Message, chat_id: int) -> int:
             username = None
             display_name = str(user_id)
 
-        await add_collection_member(db, chat_id, user_id, username, display_name)
-        stored_count += 1
-
-    resolved_usernames = set()
-    for user_id in all_user_ids:
-        cursor = await db.execute(
-            "SELECT username FROM chat_members WHERE user_id = ? AND chat_id = ?",
-            (user_id, chat_id),
-        )
-        row = await cursor.fetchone()
-        if row and row["username"]:
-            resolved_usernames.add(row["username"].lower())
+        if username:
+            resolved_usernames.add(username)
+        participants.append((user_id, username, display_name))
 
     for username in tracked_usernames - resolved_usernames:
-        await add_collection_member(db, chat_id, None, username, f"@{username}")
-        stored_count += 1
+        participants.append((None, username, f"@{username}"))
 
-    return stored_count
+    return participants
 
 
 COLLECTION_STARTED_PHRASES = (
@@ -250,13 +271,28 @@ def get_collection_started_message() -> str:
     return random.choice(COLLECTION_STARTED_PHRASES)
 
 
-async def handle_collection_message(message: Message, chat_id: int) -> bool:
+COLLECTION_CREATED = "created"
+COLLECTION_UPDATED = "updated"
+
+
+async def handle_collection_message(message: Message, chat_id: int) -> Optional[str]:
     """Create or refresh one chat's collection, preserving paid state on edits.
 
-    Returns True if this created a brand-new collection (as opposed to
-    refreshing the currently active one), so callers can announce the start.
+    Returns COLLECTION_CREATED for a brand-new collection, so callers can
+    announce the start, or COLLECTION_UPDATED for a refresh of the active one.
+    A message that names nobody (say, just the link, in reply to "where do I
+    send it?") isn't a collection: returns None and leaves the active one be.
     """
     db = await get_connection()
+    participants = await extract_participants(db, message, chat_id)
+    if not participants:
+        logger.info(
+            "Payment details but no participants, not a collection: msg_id=%d chat_id=%d",
+            message.message_id,
+            chat_id,
+        )
+        return None
+
     existing = await get_active_collection(db, chat_id)
     same_message = bool(existing and existing["message_id"] == message.message_id)
 
@@ -268,20 +304,22 @@ async def handle_collection_message(message: Message, chat_id: int) -> bool:
         paid_usernames = {m["username"] for m in old_members if m["paid"] and m["username"]}
 
     await create_collection(db, message.message_id, chat_id)
-    count = await extract_and_store_users(db, message, chat_id)
+    for user_id, username, display_name in participants:
+        await add_collection_member(db, chat_id, user_id, username, display_name)
 
     if same_message and (paid_user_ids or paid_usernames):
         await restore_paid_members(db, chat_id, paid_user_ids, paid_usernames)
 
+    outcome = COLLECTION_UPDATED if same_message else COLLECTION_CREATED
     logger.info(
         "Collection %s: msg_id=%d chat_id=%d members=%d",
-        "updated" if same_message else "created",
+        outcome,
         message.message_id,
         chat_id,
-        count,
+        len(participants),
     )
 
-    return not same_message
+    return outcome
 
 
 async def handle_reaction_update(
